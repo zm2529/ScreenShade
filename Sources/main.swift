@@ -12,7 +12,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let menu = NSMenu()
     private var windows: [NSWindow] = []
     private var countdown: Timer?
-    private var failsafe: Timer?
     private var permissionWatch: Timer?
     private var ready = false
     private var shaded = false
@@ -107,7 +106,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         add(input.permitted ? "输入监控权限：已允许" : "设置输入监控权限…", #selector(permission))
         for detail in details { add(detail, nil, enabled: false) }
-        add("1 小时后自动恢复", nil, enabled: false)
         menu.addItem(.separator())
         add("退出", #selector(quit))
         status.button?.image = NSImage(systemSymbolName: shaded ? "display.trianglebadge.exclamationmark" : "display", accessibilityDescription: "ScreenShade")
@@ -169,7 +167,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         restoreReason = "none"
         input.arm()
         details = ["已遮黑 \(windows.count) 块屏幕；正在尝试硬件调光…"]
-        failsafe = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { [weak self] _ in self?.restore() }
         writeStatus(phase: "shaded")
         brightness.dim(displays) { [weak self] messages in
             self?.details = messages; self?.writeStatus(phase: "shaded"); self?.rebuildMenu()
@@ -180,7 +177,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func restore() {
         countdown?.invalidate(); countdown = nil
-        failsafe?.invalidate(); failsafe = nil
         input.stop()
         for window in windows { window.orderOut(nil); window.close() }
         windows.removeAll()
