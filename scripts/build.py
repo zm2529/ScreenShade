@@ -21,6 +21,9 @@ def run(*args):
 def choose_identity(identities, requested=None, saved=None, ad_hoc=False):
     """Never silently change the saved identity or fall back to ad-hoc signing."""
     if ad_hoc:
+        if saved or requested:
+            raise ValueError("已经配置固定签名证书，不能用 --ad-hoc 覆盖日常使用的 App。"
+                             "请运行 python3 scripts/build.py 沿用证书；若确需临时签名实验，请使用单独的项目副本。")
         return "-", "ad-hoc"
     selected = requested or saved
     if selected:

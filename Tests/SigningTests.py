@@ -36,6 +36,14 @@ class SigningTests(unittest.TestCase):
     def test_single_identity_can_be_selected(self):
         self.assertEqual(build.choose_identity([self.first]), self.first)
 
+    def test_ad_hoc_cannot_replace_saved_certificate(self):
+        with self.assertRaises(ValueError):
+            build.choose_identity([], saved=self.first[0], ad_hoc=True)
+
+    def test_ad_hoc_cannot_override_configured_identity(self):
+        with self.assertRaises(ValueError):
+            build.choose_identity([], requested=self.first[0], ad_hoc=True)
+
 
 if __name__ == "__main__":
     unittest.main()
