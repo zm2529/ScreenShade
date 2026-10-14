@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("恢复原有硬件亮度", #selector(recoverBrightness))
         add("打开控制窗口", #selector(openControls))
         menu.addItem(.separator())
-        add(input.permitted ? "输入监控权限：已允许" : "设置输入监控权限…", #selector(permission))
+        add(input.permitted ? "输入监控权限：已允许" : "设置输入监控权限…", #selector(permission), enabled: !input.permitted)
         for detail in details { add(detail, nil, enabled: false) }
         menu.addItem(.separator())
         add("退出", #selector(quit))
@@ -138,7 +138,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggle() {
         if shaded || countdown != nil { restore(); return }
         guard ready else { return }
-        guard input.start() else { permission(); return }
+        switch input.start() {
+        case .ready: break
+        case .permissionRequired: permission(); return
+        case .unavailable(let message):
+            details = [message]
+            restoreReason = "input-device-unavailable"
+            writeStatus(phase: "input-error")
+            rebuildMenu()
+            let alert = NSAlert()
+            alert.messageText = "暂时无法监听鼠标和键盘"
+            alert.informativeText = message + "\n输入监控权限已允许；本次未开始遮黑。"
+            alert.addButton(withTitle: "好")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
         countdown = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in self?.activate() }
         rebuildMenu()
     }
@@ -209,11 +224,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func recoverBrightness() { restore() }
 
     @objc private func permission() {
+        guard !input.permitted else { return }
         restore()
-        if !input.permitted { input.requestPermission() }
+        input.requestPermission()
+        guard !input.permitted else { rebuildMenu(); return }
         let alert = NSAlert()
         alert.messageText = "允许 ScreenShade 检测你的鼠标和键盘活动"
-        alert.informativeText = "请在系统设置 → 隐私与安全性 → 输入监控中开启 ScreenShade。只检测物理设备是否有活动，不保存按键内容。权限不足时不会遮黑屏幕。允许后如系统要求，请退出并重新打开 App。"
+        alert.informativeText = "请在系统设置 → 隐私与安全性 → 输入监控中开启 ScreenShade。若开关已开启但仍提示未允许，可能是旧版本签名的授权：移除旧条目，再添加当前 App 并开启权限。允许后如系统要求，请完整退出并重新打开 App。只检测设备活动，不保存按键内容；权限不足时不会遮黑。"
         alert.addButton(withTitle: "打开输入监控设置")
         alert.addButton(withTitle: "稍后")
         NSApp.activate(ignoringOtherApps: true)

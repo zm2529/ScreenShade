@@ -3,6 +3,11 @@ import IOKit.hid
 import IOKit.hidsystem
 
 final class PhysicalInput {
+    enum StartResult {
+        case ready
+        case permissionRequired
+        case unavailable(String)
+    }
     private var manager: IOHIDManager?
     private var armedAt: UInt64 = .max
     var onActivity: ((String) -> Void)?
@@ -16,9 +21,9 @@ final class PhysicalInput {
         _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
     }
 
-    func start() -> Bool {
+    func start() -> StartResult {
         stop()
-        guard permitted else { return false }
+        guard permitted else { return .permissionRequired }
         let deviceManager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(0))
         let matches: [[String: Int]] = [
             [kIOHIDDeviceUsagePageKey: 1, kIOHIDDeviceUsageKey: 2],
@@ -47,14 +52,19 @@ final class PhysicalInput {
         }, context)
         IOHIDManagerScheduleWithRunLoop(deviceManager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         let opened = IOHIDManagerOpen(deviceManager, IOOptionBits(0))
-        guard opened == kIOReturnSuccess,
-              let devices = IOHIDManagerCopyDevices(deviceManager), CFSetGetCount(devices) > 0 else {
+        let devices = IOHIDManagerCopyDevices(deviceManager)
+        guard opened == kIOReturnSuccess, let devices, CFSetGetCount(devices) > 0 else {
             IOHIDManagerUnscheduleFromRunLoop(deviceManager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
             IOHIDManagerClose(deviceManager, IOOptionBits(0))
-            return false
+            if !permitted { return .permissionRequired }
+            if opened != kIOReturnSuccess {
+                let code = String(UInt32(bitPattern: opened), radix: 16)
+                return .unavailable("无法打开输入设备（IOKit 错误 0x\(code)）。请检查键鼠连接后重试。")
+            }
+            return .unavailable("未找到可监听的鼠标或键盘。请检查键鼠连接后重试。")
         }
         manager = deviceManager
-        return true
+        return .ready
     }
 
     func arm() { armedAt = mach_absolute_time() }
