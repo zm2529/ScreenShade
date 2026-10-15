@@ -14,4 +14,9 @@ subprocess.run(["xcrun", "swiftc", str(root / "Sources/Brightness.swift"),
                 str(root / "Sources/HardwareStandby.swift"), str(root / "Tests/BrightnessTests.swift"),
                 "-o", str(recovery)], check=True)
 subprocess.run([str(recovery)], check=True)
+verification = root / "build/standby-verification-tests"
+subprocess.run(["xcrun", "swiftc", str(root / "Sources/Brightness.swift"),
+                str(root / "Sources/HardwareStandby.swift"), str(root / "Sources/StandbyVerification.swift"),
+                str(root / "Tests/StandbyVerificationTests.swift"), "-o", str(verification)], check=True)
+subprocess.run([str(verification)], check=True)
 subprocess.run([str(root / "build/ScreenShade.app/Contents/Helpers/ddc-helper"), "--self-test"], check=True)

@@ -26,6 +26,11 @@ struct DisplayIdentity: Codable {
 }
 
 final class Brightness {
+    struct DimResult {
+        let messages: [String]
+        let confirmedStandby: [String: Int]
+    }
+
     private struct Reading: Codable { let current: Int; let maximum: Int }
     private struct Saved: Codable { let display: DisplayIdentity; let value: Int; let power: Int? }
     private let queue = DispatchQueue(label: "ScreenShade.brightness")
@@ -113,10 +118,12 @@ final class Brightness {
         try save(entries)
     }
 
-    func dim(_ displays: [DisplayIdentity], standbyModes: [String: Int] = [:], completion: @escaping ([String]) -> Void) {
+    func dim(_ displays: [DisplayIdentity], standbyModes: [String: Int] = [:], fallbackToBrightness: Bool = true,
+             completion: @escaping (DimResult) -> Void) {
         let token = nextGeneration()
         queue.async {
             var messages: [String] = []
+            var confirmedStandby: [String: Int] = [:]
             for display in displays {
                 guard self.current(token) else { break }
                 guard let value = self.read(display) else {
@@ -140,7 +147,9 @@ final class Brightness {
                     guard self.current(token) else { break }
                     let wrote = self.run(["set-power", "uuid=\(display.uuid)", String(mode)]) != nil
                     Thread.sleep(forTimeInterval: 0.5)
-                    if wrote && self.readPower(display) == mode {
+                    let observedPower = wrote ? self.readPower(display) : nil
+                    if observedPower == mode {
+                        confirmedStandby[display.uuid] = mode
                         messages.append("\(display.name)：硬件待机（已确认电源状态）")
                         continue
                     }
@@ -150,7 +159,9 @@ final class Brightness {
                         continue
                     }
                     guard self.current(token) else { break }
-                    messages.append("\(display.name)：硬件待机未确认，改用最低亮度")
+                    let reason = !wrote ? "待机指令执行失败" : observedPower.map { "电源状态读回为 \($0)" } ?? "无法读回电源状态"
+                    messages.append("\(display.name)：硬件待机未确认（\(reason)）" + (fallbackToBrightness ? "，改用最低亮度" : "，保持原亮度"))
+                    if !fallbackToBrightness { continue }
                 }
                 if value.current == 0 {
                     messages.append("\(display.name)：硬件亮度已为最低")
@@ -168,7 +179,7 @@ final class Brightness {
                 messages.append("\(display.name)：" + (verified ? "硬件亮度已降至最低" : "黑色遮罩（硬件调光未确认）"))
             }
             DispatchQueue.main.async {
-                if self.current(token) { completion(messages) }
+                if self.current(token) { completion(DimResult(messages: messages, confirmedStandby: confirmedStandby)) }
             }
         }
     }
@@ -193,8 +204,13 @@ final class Brightness {
                         messages.append("\(entry.display.name)：等待重新连接后恢复亮度")
                         continue
                     }
-                    let wrote = self.run(["set", "uuid=\(entry.display.uuid)", String(entry.value)]) != nil
-                    if !wrote || self.read(entry.display)?.current != entry.value {
+                    var restored = false
+                    for attempt in 0..<3 {
+                        let wrote = self.run(["set", "uuid=\(entry.display.uuid)", String(entry.value)]) != nil
+                        if wrote && self.read(entry.display)?.current == entry.value { restored = true; break }
+                        if attempt < 2 { Thread.sleep(forTimeInterval: 0.2) }
+                    }
+                    if !restored {
                         pending.append(entry)
                         messages.append("\(entry.display.name)：原亮度恢复未确认，请重试")
                     }
