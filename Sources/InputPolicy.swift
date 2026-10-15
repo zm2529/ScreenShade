@@ -1,6 +1,18 @@
 import Foundation
 
 enum InputPolicy {
+    static func isPhysicalDevice(transport: String?, builtIn: Bool) -> Bool {
+        let transport = transport?.lowercased().replacingOccurrences(of: " ", with: "")
+        guard transport != "virtual" else { return false }
+        if builtIn { return true }
+        switch transport {
+        case "usb", "bluetooth", "bluetoothlowenergy", "spi", "i2c", "serial", "aid", "fifo", "spu", "bt-aacp", "iap":
+            return true
+        default:
+            return false
+        }
+    }
+
     /// HID values come from devices, rather than posted macOS UI events.
     static func isActivity(page: UInt32, usage: UInt32, value: Int) -> Bool {
         guard value != 0 else { return false }

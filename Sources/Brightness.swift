@@ -27,18 +27,18 @@ struct DisplayIdentity: Codable {
 
 final class Brightness {
     private struct Reading: Codable { let current: Int; let maximum: Int }
-    private struct Saved: Codable { let display: DisplayIdentity; let value: Int }
+    private struct Saved: Codable { let display: DisplayIdentity; let value: Int; let power: Int? }
     private let queue = DispatchQueue(label: "ScreenShade.brightness")
     private let lock = NSLock()
     private var generation = 0
     private let journal: URL
     private let helper: URL
 
-    init() {
+    init(journal: URL? = nil, helper: URL? = nil) {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScreenShade", isDirectory: true)
-        journal = directory.appendingPathComponent("brightness-recovery.json")
-        helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/ddc-helper")
+        self.journal = journal ?? directory.appendingPathComponent("brightness-recovery.json")
+        self.helper = helper ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/ddc-helper")
     }
 
     private func nextGeneration() -> Int {
@@ -73,11 +73,27 @@ final class Brightness {
         return pipe.fileHandleForReading.readDataToEndOfFile()
     }
 
-    private func read(_ id: UInt32) -> Reading? {
-        guard let data = run(["read", String(id)]),
+    private func read(_ display: DisplayIdentity) -> Reading? {
+        guard let data = run(["read", "uuid=\(display.uuid)"]),
               let value = try? JSONDecoder().decode(Reading.self, from: data),
               value.maximum > 0, value.current >= 0, value.current <= value.maximum else { return nil }
         return value
+    }
+
+    private func readPower(_ display: DisplayIdentity) -> Int? {
+        guard let data = run(["read-power", "uuid=\(display.uuid)"]),
+              let value = try? JSONDecoder().decode(Reading.self, from: data),
+              (1...4).contains(value.current) else { return nil }
+        return value.current
+    }
+
+    private func wake(_ display: DisplayIdentity) -> Bool {
+        for _ in 0..<3 {
+            _ = run(["set-power", "uuid=\(display.uuid)", "1"])
+            Thread.sleep(forTimeInterval: 0.5)
+            if readPower(display) == 1 { return true }
+        }
+        return false
     }
 
     private func load() throws -> [Saved] {
@@ -90,32 +106,65 @@ final class Brightness {
         try JSONEncoder().encode(entries).write(to: journal, options: .atomic)
     }
 
-    func dim(_ displays: [DisplayIdentity], completion: @escaping ([String]) -> Void) {
+    private func remember(_ display: DisplayIdentity, value: Int, power: Int?) throws {
+        var entries = try load()
+        entries.removeAll { $0.display.uuid == display.uuid }
+        entries.append(Saved(display: display, value: value, power: power))
+        try save(entries)
+    }
+
+    func dim(_ displays: [DisplayIdentity], standbyModes: [String: Int] = [:], completion: @escaping ([String]) -> Void) {
         let token = nextGeneration()
         queue.async {
             var messages: [String] = []
             for display in displays {
                 guard self.current(token) else { break }
-                guard let value = self.read(display.displayID) else {
+                guard let value = self.read(display) else {
                     messages.append("\(display.name)：黑色遮罩（硬件亮度不可读取）")
                     continue
+                }
+                if let mode = standbyModes[display.uuid], [2, 4].contains(mode) {
+                    guard let originalPower = self.readPower(display) else {
+                        messages.append("\(display.name)：黑色遮罩（电源状态不可读取，未改变硬件）")
+                        continue
+                    }
+                    guard originalPower == 1 else {
+                        messages.append("\(display.name)：原已待机，保持原电源状态")
+                        continue
+                    }
+                    do { try self.remember(display, value: value.current, power: originalPower) }
+                    catch {
+                        messages.append("\(display.name)：黑色遮罩（电源恢复记录保存失败）")
+                        continue
+                    }
+                    guard self.current(token) else { break }
+                    let wrote = self.run(["set-power", "uuid=\(display.uuid)", String(mode)]) != nil
+                    Thread.sleep(forTimeInterval: 0.5)
+                    if wrote && self.readPower(display) == mode {
+                        messages.append("\(display.name)：硬件待机（已确认电源状态）")
+                        continue
+                    }
+                    // Keep the persisted wake record until power-on is confirmed.
+                    guard self.wake(display) else {
+                        messages.append("\(display.name)：唤醒未确认，请恢复屏幕或使用显示器电源键")
+                        continue
+                    }
+                    guard self.current(token) else { break }
+                    messages.append("\(display.name)：硬件待机未确认，改用最低亮度")
                 }
                 if value.current == 0 {
                     messages.append("\(display.name)：硬件亮度已为最低")
                     continue
                 }
                 do {
-                    var entries = try self.load()
-                    entries.removeAll { $0.display.uuid == display.uuid }
-                    entries.append(Saved(display: display, value: value.current))
-                    try self.save(entries) // Persist the original before changing hardware.
+                    try self.remember(display, value: value.current, power: nil)
                 } catch {
                     messages.append("\(display.name)：黑色遮罩（原亮度保存失败）")
                     continue
                 }
                 guard self.current(token) else { break }
-                let wrote = self.run(["set", String(display.displayID), "0"]) != nil
-                let verified = wrote && self.read(display.displayID)?.current == 0
+                let wrote = self.run(["set", "uuid=\(display.uuid)", "0"]) != nil
+                let verified = wrote && self.read(display)?.current == 0
                 messages.append("\(display.name)：" + (verified ? "硬件亮度已降至最低" : "黑色遮罩（硬件调光未确认）"))
             }
             DispatchQueue.main.async {
@@ -132,13 +181,20 @@ final class Brightness {
             var messages: [String] = []
             do {
                 for entry in try self.load() {
-                    guard let id = DisplayIdentity.currentID(for: entry.display.uuid) else {
+                    if let power = entry.power {
+                        guard power == 1 && self.wake(entry.display) else {
+                            pending.append(entry)
+                            messages.append("\(entry.display.name)：唤醒未确认，保留恢复记录")
+                            continue
+                        }
+                    }
+                    guard DisplayIdentity.currentID(for: entry.display.uuid) != nil else {
                         pending.append(entry)
                         messages.append("\(entry.display.name)：等待重新连接后恢复亮度")
                         continue
                     }
-                    let wrote = self.run(["set", String(id), String(entry.value)]) != nil
-                    if !wrote || self.read(id)?.current != entry.value {
+                    let wrote = self.run(["set", "uuid=\(entry.display.uuid)", String(entry.value)]) != nil
+                    if !wrote || self.read(entry.display)?.current != entry.value {
                         pending.append(entry)
                         messages.append("\(entry.display.name)：原亮度恢复未确认，请重试")
                     }

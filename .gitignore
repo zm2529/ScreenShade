@@ -1,3 +1,8 @@
 build/
+.code-review-graph/
 .DS_Store
 *.log
+standby-compatibility.json
+brightness-recovery.json
+status.json
+signing-identity.txt

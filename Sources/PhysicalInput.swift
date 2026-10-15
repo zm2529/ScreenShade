@@ -21,6 +21,12 @@ final class PhysicalInput {
         _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
     }
 
+    private static func isPhysical(_ device: IOHIDDevice) -> Bool {
+        InputPolicy.isPhysicalDevice(
+            transport: IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String,
+            builtIn: (IOHIDDeviceGetProperty(device, kIOHIDBuiltInKey as CFString) as? NSNumber)?.boolValue ?? false)
+    }
+
     func start() -> StartResult {
         stop()
         guard permitted else { return .permissionRequired }
@@ -35,9 +41,10 @@ final class PhysicalInput {
         IOHIDManagerRegisterInputValueCallback(deviceManager, { context, result, _, value in
             guard let context else { return }
             let observer = Unmanaged<PhysicalInput>.fromOpaque(context).takeUnretainedValue()
+            let element = IOHIDValueGetElement(value)
+            guard PhysicalInput.isPhysical(IOHIDElementGetDevice(element)) else { return }
             if result != kIOReturnSuccess { observer.onFailure?(); return }
             guard IOHIDValueGetTimeStamp(value) >= observer.armedAt else { return }
-            let element = IOHIDValueGetElement(value)
             if InputPolicy.isActivity(page: IOHIDElementGetUsagePage(element),
                                       usage: IOHIDElementGetUsage(element),
                                       value: IOHIDValueGetIntegerValue(value)) {
@@ -46,14 +53,14 @@ final class PhysicalInput {
                 observer.onActivity?(page == 7 || page == 0x0C ? "keyboard" : "mouse")
             }
         }, context)
-        IOHIDManagerRegisterDeviceRemovalCallback(deviceManager, { context, _, _, _ in
-            guard let context else { return }
+        IOHIDManagerRegisterDeviceRemovalCallback(deviceManager, { context, _, _, device in
+            guard let context, PhysicalInput.isPhysical(device) else { return }
             Unmanaged<PhysicalInput>.fromOpaque(context).takeUnretainedValue().onFailure?()
         }, context)
         IOHIDManagerScheduleWithRunLoop(deviceManager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         let opened = IOHIDManagerOpen(deviceManager, IOOptionBits(0))
-        let devices = IOHIDManagerCopyDevices(deviceManager)
-        guard opened == kIOReturnSuccess, let devices, CFSetGetCount(devices) > 0 else {
+        let devices = IOHIDManagerCopyDevices(deviceManager) as? Set<IOHIDDevice>
+        guard opened == kIOReturnSuccess, let devices, devices.contains(where: Self.isPhysical) else {
             IOHIDManagerUnscheduleFromRunLoop(deviceManager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
             IOHIDManagerClose(deviceManager, IOOptionBits(0))
             if !permitted { return .permissionRequired }
@@ -61,7 +68,7 @@ final class PhysicalInput {
                 let code = String(UInt32(bitPattern: opened), radix: 16)
                 return .unavailable("无法打开输入设备（IOKit 错误 0x\(code)）。请检查键鼠连接后重试。")
             }
-            return .unavailable("未找到可监听的鼠标或键盘。请检查键鼠连接后重试。")
+            return .unavailable("未找到可监听的物理鼠标或键盘。请检查键鼠连接后重试。")
         }
         manager = deviceManager
         return .ready

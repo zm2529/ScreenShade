@@ -8,9 +8,11 @@ final class ShadeWindow: NSWindow {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let input = PhysicalInput()
     private let brightness = Brightness()
+    private let remoteWake = RemoteWakeHotKey()
     private var status: NSStatusItem!
     private let menu = NSMenu()
     private var windows: [NSWindow] = []
+    private var closePanels: [ShadeClosePanel] = []
     private var countdown: Timer?
     private var permissionWatch: Timer?
     private var ready = false
@@ -19,15 +21,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var exiting = false
     private var menuTracking = false
     private var controlWindow: NSWindow?
+    private var standbyStack: NSStackView?
+    private var standbyControls: [String: NSButton] = [:]
     private var activeLayout = ""
     private var restoreReason = "manual"
+    private var standbyModes: [String: Int] { remoteWake.isRegistered ? HardwareStandby.selectedModes() : [:] }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "").count > 1 {
-            DistributedNotificationCenter.default().post(name: .init("local.ScreenShade.toggle"), object: nil)
+            DistributedNotificationCenter.default().post(name: .init("local.ScreenShade.showControls"), object: nil)
             NSApp.terminate(nil)
             return
         }
+        remoteWake.onWake = { [weak self] in
+            self?.restoreReason = "remote-wake-hotkey"
+            self?.restore()
+        }
+        remoteWake.start()
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "ScreenShade")
         status.menu = menu
@@ -41,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(toggle), name: .init("local.ScreenShade.toggle"), object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(restore), name: .init("local.ScreenShade.restore"), object: nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(openControls), name: .init("local.ScreenShade.showControls"), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(topologyChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(restore), name: NSWorkspace.willSleepNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(restore), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
@@ -67,22 +78,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showControls() {
         if let controlWindow { controlWindow.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 245),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 300),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "ScreenShade"
         window.isReleasedWhenClosed = false
         let heading = NSTextField(labelWithString: "让 Codex 工作，让屏幕安静下来")
         heading.font = .systemFont(ofSize: 19, weight: .semibold)
-        let description = NSTextField(wrappingLabelWithString: "同时遮黑所有屏幕，尝试降低硬件亮度。\n你移动鼠标或按任意键时恢复。")
+        let description = NSTextField(wrappingLabelWithString: "同时遮黑所有屏幕，尝试降低硬件亮度。\n本机移动鼠标或按任意键恢复；远程控制时，\n可点击遮罩右上角的“关闭遮罩”。")
         let start = NSButton(title: "遮黑所有屏幕（2 秒后）", target: self, action: #selector(toggle))
         start.bezelStyle = .rounded
         let restore = NSButton(title: "恢复画面与原亮度", target: self, action: #selector(recoverBrightness))
         restore.bezelStyle = .rounded
         let permission = NSButton(title: "设置输入监控权限…", target: self, action: #selector(permission))
         permission.bezelStyle = .rounded
+        let wakeHint = NSTextField(labelWithString: remoteWake.isRegistered ? "远程唤醒全部屏幕：⌃⌥⌘R" : "远程唤醒快捷键注册失败，硬件待机暂不可用")
+        wakeHint.font = .systemFont(ofSize: 13)
+        wakeHint.toolTip = "从远端向 Mac 发送 Control + Option + Command + R，唤醒全部屏幕并恢复原亮度。普通按键不会触发。"
+        let standby = NSStackView()
+        standby.orientation = .vertical; standby.alignment = .leading; standby.spacing = 8
+        standbyStack = standby
         let row = NSStackView(views: [start, restore])
         row.orientation = .horizontal; row.spacing = 12
-        let stack = NSStackView(views: [heading, description, row, permission])
+        let stack = NSStackView(views: [heading, description, standby, wakeHint, row, permission])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
         window.contentView?.addSubview(stack)
@@ -91,18 +108,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                          stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
                                          stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24)])
         }
-        window.center()
         controlWindow = window
+        rebuildMenu()
+        window.center()
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func rebuildStandbyControls(_ displays: [DisplayIdentity], modes: [String: Int]) {
+        guard let standbyStack else { return }
+        if Set(standbyControls.keys) != Set(displays.map(\.uuid)) {
+            for view in standbyStack.arrangedSubviews { standbyStack.removeArrangedSubview(view); view.removeFromSuperview() }
+            standbyControls.removeAll()
+            let label = NSTextField(labelWithString: "硬件待机（逐屏设置）")
+            label.font = .systemFont(ofSize: 13, weight: .medium)
+            standbyStack.addArrangedSubview(label)
+            for display in displays {
+                let button = NSButton(checkboxWithTitle: display.name, target: self, action: #selector(toggleStandby(_:)))
+                button.identifier = NSUserInterfaceItemIdentifier(display.uuid)
+                standbyControls[display.uuid] = button
+                standbyStack.addArrangedSubview(button)
+            }
+            controlWindow?.setContentSize(NSSize(width: 440, height: 336 + CGFloat(displays.count) * 28))
+        }
+        for display in displays {
+            let verified = modes[display.uuid] != nil
+            let button = standbyControls[display.uuid]
+            button?.title = verified ? "\(display.name)：硬件待机" : "\(display.name)：未通过待机验证"
+            button?.state = verified && remoteWake.isRegistered && HardwareStandby.selectedDisplays.contains(display.uuid) ? .on : .off
+            button?.isEnabled = verified && remoteWake.isRegistered && ready && !shaded && countdown == nil
+            button?.toolTip = !verified ? "当前连接和桌面布局下没有已通过的待机配置，本屏继续使用遮罩和最低亮度。"
+                : remoteWake.isRegistered ? "只对这块屏幕启用硬件待机；不勾选时使用遮罩和最低亮度。"
+                : "远程唤醒快捷键无法注册，暂不使用硬件待机。"
+        }
     }
 
     private func rebuildMenu() {
         guard status != nil, !menuTracking else { return }
+        let modes = HardwareStandby.validatedModes()
+        let displays = DisplayIdentity.connected()
+        rebuildStandbyControls(displays, modes: modes)
         menu.removeAllItems()
         add(shaded ? "已遮黑全部屏幕" : (countdown != nil ? "2 秒后遮黑…" : "ScreenShade"), nil, enabled: false)
         add(shaded || countdown != nil ? "恢复全部屏幕" : "遮黑所有屏幕", #selector(toggle), enabled: ready || shaded || countdown != nil)
-        add("恢复原有硬件亮度", #selector(recoverBrightness))
+        add(remoteWake.isRegistered ? "唤醒全部屏幕并恢复原亮度（⌃⌥⌘R）" : "唤醒全部屏幕并恢复原亮度（快捷键不可用）", #selector(recoverBrightness))
         add("打开控制窗口", #selector(openControls))
+        menu.addItem(.separator())
+        add("硬件待机（逐屏设置）", nil, enabled: false)
+        for display in displays {
+            let verified = modes[display.uuid] != nil
+            add(verified ? display.name : "\(display.name)（未通过验证）", #selector(toggleStandby(_:)),
+                enabled: verified && remoteWake.isRegistered && ready && !shaded && countdown == nil)
+            menu.items.last?.representedObject = display.uuid
+            menu.items.last?.state = verified && remoteWake.isRegistered && HardwareStandby.selectedDisplays.contains(display.uuid) ? .on : .off
+        }
         menu.addItem(.separator())
         add(input.permitted ? "输入监控权限：已允许" : "设置输入监控权限…", #selector(permission), enabled: !input.permitted)
         for detail in details { add(detail, nil, enabled: false) }
@@ -113,7 +171,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) { rebuildMenu(); menuTracking = true }
     func menuDidClose(_ menu: NSMenu) { menuTracking = false }
-    @objc private func openControls() { showControls(); NSApp.activate(ignoringOtherApps: true) }
+    @objc private func openControls() {
+        guard !shaded && countdown == nil else { return }
+        showControls()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func toggleStandby(_ sender: AnyObject) {
+        let uuid = (sender as? NSButton)?.identifier?.rawValue ?? (sender as? NSMenuItem)?.representedObject as? String
+        guard let uuid, remoteWake.isRegistered && ready && !shaded && countdown == nil && HardwareStandby.validatedModes()[uuid] != nil else { return }
+        HardwareStandby.setEnabled(!HardwareStandby.selectedDisplays.contains(uuid), for: uuid)
+        writeStatus(phase: "ready")
+        rebuildMenu()
+    }
 
     private func screenLayout() -> String {
         NSScreen.screens.map { screen in
@@ -127,7 +197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .appendingPathComponent("ScreenShade", isDirectory: true)
         let record: [String: Any] = ["phase": phase, "timestamp": Date().timeIntervalSince1970,
                                     "displayCount": windows.count, "restoreReason": restoreReason,
-                                    "inputPermission": input.permitted, "details": details]
+                                    "inputPermission": input.permitted, "details": details,
+                                    "hardwareStandbyDisplays": standbyModes.keys.sorted(), "remoteWakeHotkeyAvailable": remoteWake.isRegistered]
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try JSONSerialization.data(withJSONObject: record, options: .sortedKeys)
@@ -176,6 +247,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             window.isReleasedWhenClosed = false
             window.orderFrontRegardless()
             windows.append(window)
+            let closePanel = ShadeClosePanel(screen: screen, target: self, action: #selector(closeShade))
+            closePanel.orderFrontRegardless()
+            closePanels.append(closePanel)
         }
         shaded = true
         activeLayout = screenLayout()
@@ -183,16 +257,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         input.arm()
         details = ["已遮黑 \(windows.count) 块屏幕；正在尝试硬件调光…"]
         writeStatus(phase: "shaded")
-        brightness.dim(displays) { [weak self] messages in
+        brightness.dim(displays, standbyModes: standbyModes) { [weak self] messages in
             self?.details = messages; self?.writeStatus(phase: "shaded"); self?.rebuildMenu()
         }
         rebuildMenu()
         NSLog("ScreenShade: shaded %d displays", windows.count)
     }
 
+    @objc private func closeShade() {
+        guard shaded else { return }
+        restoreReason = "overlay-close-button"
+        restore()
+    }
+
     @objc private func restore() {
         countdown?.invalidate(); countdown = nil
         input.stop()
+        for panel in closePanels { panel.orderOut(nil); panel.close() }
+        closePanels.removeAll()
         for window in windows { window.orderOut(nil); window.close() }
         windows.removeAll()
         shaded = false
@@ -250,7 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        toggle(); return false
+        openControls(); return false
     }
 }
 

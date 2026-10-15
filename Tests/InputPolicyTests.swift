@@ -2,6 +2,17 @@ import Foundation
 
 @main struct InputPolicyTests {
     static func main() {
+        precondition(InputPolicy.isPhysicalDevice(transport: "USB", builtIn: false))
+        precondition(InputPolicy.isPhysicalDevice(transport: "Bluetooth Low Energy", builtIn: false))
+        precondition(InputPolicy.isPhysicalDevice(transport: "BluetoothLowEnergy", builtIn: false))
+        precondition(InputPolicy.isPhysicalDevice(transport: "SPI", builtIn: true))
+        precondition(InputPolicy.isPhysicalDevice(transport: "Audio", builtIn: true))
+        precondition(!InputPolicy.isPhysicalDevice(transport: "Virtual", builtIn: false))
+        precondition(!InputPolicy.isPhysicalDevice(transport: "Virtual", builtIn: true))
+        precondition(!InputPolicy.isPhysicalDevice(transport: "AirPlay", builtIn: false))
+        precondition(!InputPolicy.isPhysicalDevice(transport: nil, builtIn: false))
+        precondition(!InputPolicy.isPhysicalDevice(transport: "Unknown", builtIn: false))
+
         func check(_ page: UInt32, _ usage: UInt32, _ value: Int, _ expected: Bool) {
             precondition(InputPolicy.isActivity(page: page, usage: usage, value: value) == expected,
                          "Unexpected activity for \(page):\(usage):\(value)")
