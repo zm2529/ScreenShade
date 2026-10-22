@@ -101,6 +101,10 @@ python3 scripts/test.py
 
 使用 Swift + AppKit + IOKit，无第三方运行时依赖。DDC 注册表和传输代码来自 [m1ddc](https://github.com/waydabber/m1ddc)，固定版本与修改说明见 `Vendor/m1ddc/UPSTREAM.md`，保留 MIT 许可。
 
+## 许可证
+
+ScreenShade 使用 [MIT License](LICENSE)。第三方 m1ddc 代码保留其原有版权声明和 [MIT 许可证](Vendor/m1ddc/LICENSE)，来源与修改说明见 [UPSTREAM.md](Vendor/m1ddc/UPSTREAM.md)。
+
 ## GitHub 发行版
 
 当前仓库提供源码构建方式，尚未提供经过 Apple 公证的下载版。其他用户不需要项目作者的证书：可以在自己的 Mac 上选择自己的证书，或使用 `--ad-hoc` 构建。
